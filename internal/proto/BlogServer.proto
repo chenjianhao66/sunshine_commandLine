@@ -1,0 +1,20 @@
+syntax = "proto3";
+package grpc;
+option go_package = "./;grpc";
+
+
+service Blog {
+  rpc uploadBlog(stream BlogReq) returns (BlogResp) {};
+}
+
+// 请求参数
+message BlogReq {
+  string name = 1;
+  bytes body = 2;
+}
+
+// 返回参数
+message BlogResp {
+  int32 code = 1;
+  string message = 2;
+}

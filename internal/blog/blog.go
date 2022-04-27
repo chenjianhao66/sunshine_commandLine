@@ -2,11 +2,14 @@ package blog
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
+	grpcServer "github.com/chenjianhao66/sunshine_commandLine/internal/grpc"
 	"github.com/chenjianhao66/sunshine_commandLine/internal/model"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"google.golang.org/grpc"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -37,15 +40,16 @@ func (receiver *blog) Run(cmd *cobra.Command, args []string) {
 		fmt.Printf("花费时间 -> %v", time.Since(now).Milliseconds())
 	}()
 	var (
-		target *os.File
-		source *os.File
-		err    error
+		target   *os.File
+		source   *os.File
+		err      error
+		fileList []string //存放一次命令执行所生成的目标文件
 	)
 	if sourceFilesLocation == nil {
 		fmt.Println("source是必需选项")
 		return
 	}
-	// 判断源文件是否都是markdown文件
+	// 遍历参数传进来的源文件，并且对源文件添加hexo博客头部信息，传输到目标文件夹
 	for i := 0; i < len(sourceFilesLocation); i++ {
 		if err := checkFileSuffix(sourceFilesLocation[i]); err != nil {
 			fmt.Println(err.Error())
@@ -57,7 +61,7 @@ func (receiver *blog) Run(cmd *cobra.Command, args []string) {
 			fmt.Println(sourceFilesLocation[i], "文件不存在")
 			return
 		}
-
+		fmt.Println("-------------------")
 		// 通过反射拿到输入对象的字段数，通过for循环从控制台输入每一个字段的信息
 		typeOf := reflect.TypeOf(model.BlogHead{})
 		blogHead := &model.BlogHead{}
@@ -76,7 +80,10 @@ func (receiver *blog) Run(cmd *cobra.Command, args []string) {
 			valueOf.Elem().FieldByName(typeOf.Field(i).Name).SetString(input)
 		}
 		fmt.Printf("最终输入的对象 \n%+v", blogHead)
-		target, err = os.OpenFile(filepath.Join(targetFilesLocation, source.Name()), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		targetName := filepath.Join(targetFilesLocation, source.Name())
+		// 将生成的目标文件路径传入到切片中，方便后续的grpc使用
+		fileList = append(fileList, targetName)
+		target, err = os.OpenFile(targetName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			fmt.Println(err.Error())
 		}
@@ -84,7 +91,46 @@ func (receiver *blog) Run(cmd *cobra.Command, args []string) {
 		readAll, _ := ioutil.ReadAll(source)
 		target.Write(readAll)
 	}
+	err = sendRemoteServer(fileList)
+	if err != nil {
+		fmt.Printf("调用sendRemoteServer函数失败：%s\n", err)
+	}
+}
 
+// 对远端服务器进行grpc调用
+func sendRemoteServer(fileList []string) error {
+	conn, err := grpc.Dial("127.0.0.1:8081", grpc.WithInsecure())
+	//conn, err := grpc.Dial("106.12.119.240:8081", grpc.WithInsecure())
+	if err != nil {
+		fmt.Printf("grpc服务连接错误：%s\n", err)
+		return errors.New(fmt.Sprintf("grpc服务连接失败：%s\n", err))
+	}
+	defer conn.Close()
+
+	// 新建客户端
+	client := grpcServer.NewBlogClient(conn)
+
+	stream, err := client.UploadBlog(context.Background(), grpc.EmptyCallOption{})
+	if err != nil {
+		fmt.Printf("获取流数据错误：%s\n", err)
+	}
+	// 循环发送数据
+	fmt.Println("测试")
+	for _, file := range fileList {
+		fileInfo, _ := os.Open(file)
+		bytes, _ := ioutil.ReadAll(fileInfo) // 读取文件
+		_ = stream.Send(&grpcServer.BlogReq{
+			Name: fileInfo.Name(),
+			Body: bytes,
+		})
+		fmt.Printf("发送一次数据：%s\n", fileInfo.Name())
+	}
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		fmt.Printf("关闭数据流失败：%s\n", err)
+	}
+	fmt.Printf("返回结果：%s\n", resp)
+	return nil
 }
 
 // 检查文件是否是md文件
